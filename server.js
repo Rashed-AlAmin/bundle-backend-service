@@ -7,7 +7,24 @@ app.use(cors());
 app.use(express.json());
 
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
-const ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
+const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
+const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
+
+// Helper function to get a fresh access token
+async function getAccessToken() {
+    const url = `https://${SHOPIFY_STORE}/admin/oauth/access_token`;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            client_id: CLIENT_ID,
+            client_secret: CLIENT_SECRET,
+            grant_type: 'client_credentials'
+        })
+    });
+    const data = await response.json();
+    return data.access_token;
+}
 
 app.post('/bundle-checkout', async (req, res) => {
   try {
@@ -17,6 +34,9 @@ app.post('/bundle-checkout', async (req, res) => {
       return res.status(400).json({ error: 'No line items provided' });
     }
 
+    // Automatically fetch a fresh token for this request
+    const currentToken = await getAccessToken();
+
     console.log('Received line items:', JSON.stringify(line_items, null, 2));
 
     const draftOrderPayload = {
@@ -24,12 +44,6 @@ app.post('/bundle-checkout', async (req, res) => {
         line_items: line_items.map(item => ({
           variant_id: parseInt(item.variant_id),
           quantity: 1,
-          /*
-            applied_discount on each line item overrides price.
-            We calculate the discount amount = original - bundle price.
-            Shopify applies this as a line item level discount
-            which shows as crossed out original + new price at checkout.
-          */
           applied_discount: {
             value_type: 'fixed_amount',
             value: item.original_price 
@@ -41,10 +55,6 @@ app.post('/bundle-checkout', async (req, res) => {
             title: 'Bundle Price'
           }
         })),
-        /*
-          tax_exempt: true removes tax from draft order.
-          We treat bundle prices as tax-inclusive.
-        */
         tax_exempt: true,
         shipping_line: {
           title: 'Free Shipping',
@@ -64,7 +74,7 @@ app.post('/bundle-checkout', async (req, res) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': ACCESS_TOKEN
+          'X-Shopify-Access-Token': currentToken // Using the refreshed token here
         },
         body: JSON.stringify(draftOrderPayload)
       }
@@ -78,15 +88,6 @@ app.post('/bundle-checkout', async (req, res) => {
     }
 
     const draftOrder = data.draft_order;
-    console.log('Draft order created:', draftOrder.id);
-    console.log('Line items in response:', JSON.stringify(
-      draftOrder.line_items.map(i => ({
-        title: i.title,
-        price: i.price,
-        discount: i.applied_discount
-      })), null, 2
-    ));
-
     res.json({
       checkout_url: draftOrder.invoice_url,
       draft_order_id: draftOrder.id
